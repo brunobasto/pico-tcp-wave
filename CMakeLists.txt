@@ -14,23 +14,31 @@ endif()
 pico_sdk_init()
 
 CPMAddPackage(
-    NAME usbnet
+    NAME pico_usbnet
     GIT_REPOSITORY "https://github.com/brunobasto/pico-usbnet.git"
+    GIT_TAG "main"
+)
+
+CPMAddPackage(
+    NAME pico_adc
+    GIT_REPOSITORY "https://github.com/brunobasto/pico-adc.git"
     GIT_TAG "main"
 )
 
 add_executable(${PROJECT_NAME}
     src/main.cpp
+    src/debug.cpp
+    src/wave.cpp
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${usbnet_SOURCE_DIR}/include
 )
 
 target_link_libraries(${PROJECT_NAME}
     pico_stdlib
-    usbnet
+    pico_adc
+    pico_usbnet
 )
 
 pico_enable_stdio_usb(${PROJECT_NAME} 0)

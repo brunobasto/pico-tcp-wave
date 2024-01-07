@@ -1,16 +1,15 @@
 #include <hardware/gpio.h>
-#include <math.h>
-#include <usbnet/TCP.h>
-#include <usbnet/USBNetwork.h>
+#include <pico-usbnet/TCP.h>
+#include <pico-usbnet/USBNetwork.h>
+#include <pico-adc/AdcStream.h>
+#include "debug.h"
 
-#define LED_PIN 25
+#define CAPTURE_DEPTH TCP_MSS
 
 TCP tcp;
-
-float frequency = 200.0;                        // Sine wave frequency in Hz
-float sampleRate = 250000;                      // Sample rate in samples per second
-int waveLength = (int)(sampleRate / frequency); // Number of samples per wave cycle
-int counter = 0;
+uint8_t readyId = 0;
+bool hasData = false;
+bool connected = false;
 
 std::vector<dhcp_entry_t> dhcp = {
     {{0}, IPADDR4_INIT_BYTES(192, 168, 7, 3), 24 * 60 * 60},
@@ -20,46 +19,45 @@ USBNetwork network(
     IPADDR4_INIT_BYTES(192, 168, 7, 6),   // IP address
     IPADDR4_INIT_BYTES(255, 255, 255, 0), // Netmask
     IPADDR4_INIT_BYTES(192, 168, 7, 2),   // Gateway
-    dhcp
-);
-
-void blinkPattern(int pin, int blinks, int duration)
-{
-    for (int i = 0; i < blinks; i++)
-    {
-        gpio_put(pin, 1);
-        sleep_ms(duration);
-        gpio_put(pin, 0);
-        sleep_ms(duration);
-    }
-}
-
-bool sendValue(struct repeating_timer *t)
-{
-    float wave = sin(2 * M_PI * frequency * (counter / sampleRate));
-    tcp.send(&wave, sizeof(wave));
-
-    // Reset counter after each cycle
-    counter = (counter + 1) % waveLength;
-
-    return true;
-}
+    dhcp);
 
 void acceptCallback(struct tcp_pcb *newpcb, err_t err)
 {
-    blinkPattern(LED_PIN, 15, 25);
+    connected = 1;
+    // blinkPattern(LED_PIN, 15, 25);
 }
 
 void closeCallback()
 {
-    blinkPattern(LED_PIN, 15, 25);
+    connected = 0;
+    // blinkPattern(LED_PIN, 15, 25);
+}
+
+void adcCallback(uint8_t id, uint8_t *buffer, int size)
+{
+    if (connected)
+    {
+        if (id == 0)
+        {
+            readyId = 0;
+            hasData = true;
+        }
+        else if (id == 1)
+        {
+            readyId = 1;
+            hasData = true;
+        }
+    }
 }
 
 int main()
 {
     // Set up GPIO
-    gpio_init(LED_PIN);
-    gpio_set_dir(LED_PIN, GPIO_OUT);
+    gpio_init(PICO_DEFAULT_LED_PIN);
+    gpio_set_dir(PICO_DEFAULT_LED_PIN, GPIO_OUT);
+    gpio_init(26 + 0);
+    gpio_set_dir(26 + 0, GPIO_IN);
+    // gpio_set_pulls(26 + 0, false, true);
 
     // Set up network
     network.init();
@@ -70,17 +68,62 @@ int main()
     // Setup TCP callbacks
     tcp.onAccept(acceptCallback);
     tcp.onClose(closeCallback);
+    tcp.onError([](err_t err) {
+        // tcp.close();
+        // debugError(err);
+    });
+    tcp.onSent([](err_t err) {
+        hasData = false;
+    });
 
     // Start listening
     tcp.bind(IP_ADDR_ANY, 5555);
     tcp.listen();
 
+    AdcStream<uint8_t> adcStream({0}, CAPTURE_DEPTH);
+    adcStream.registerCallback(adcCallback);
+    adcStream.startCapture();
+
+    bool failed = false;
+
     while (true)
     {
-        sendValue(NULL);
-        sleep_us(1e6 / sampleRate);
-
         network.work();
+
+        if (connected && hasData)
+        {
+            err_t err = ERR_OK;
+
+            if (tcp.getAvailableSize() < CAPTURE_DEPTH)
+            {
+                continue;
+            }
+            else if (readyId == 0)
+            {
+                err = tcp.send(adcStream.getBufferA(), CAPTURE_DEPTH);
+                hasData = false;
+            }
+            else if (readyId == 1)
+            {
+                err = tcp.send(adcStream.getBufferB(), CAPTURE_DEPTH);
+                hasData = false;
+            }
+            if (err != ERR_OK)
+            {
+                if (err == ERR_MEM)
+                {
+                    // debugError(err);
+                }
+                else
+                {
+                    connected = false;
+                    failed = true;
+                    debugError(err);
+                    tcp.close();
+                    // break;
+                }
+            }
+        }
     }
 
     return 0;
