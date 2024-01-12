@@ -1,15 +1,16 @@
 #include <hardware/gpio.h>
 #include <pico-usbnet/TCP.h>
 #include <pico-usbnet/USBNetwork.h>
-#include <pico-adc/AdcStream.h>
+#include <pico-adc/AdcSampler.h>
+#include <pico-adc/PicoAdcHardware.h>
 #include "debug.h"
 
 #define CAPTURE_DEPTH TCP_MSS
 
 TCP tcp;
-uint8_t readyId = 0;
 bool hasData = false;
 bool connected = false;
+uint8_t *readyBuffer = nullptr;
 
 std::vector<dhcp_entry_t> dhcp = {
     {{0}, IPADDR4_INIT_BYTES(192, 168, 7, 3), 24 * 60 * 60},
@@ -33,20 +34,12 @@ void closeCallback()
     // blinkPattern(LED_PIN, 15, 25);
 }
 
-void adcCallback(uint8_t id, uint8_t *buffer, int size)
+void adcCallback(uint8_t *buffer, int size)
 {
     if (connected)
     {
-        if (id == 0)
-        {
-            readyId = 0;
-            hasData = true;
-        }
-        else if (id == 1)
-        {
-            readyId = 1;
-            hasData = true;
-        }
+        hasData = true;
+        readyBuffer = buffer;
     }
 }
 
@@ -68,21 +61,22 @@ int main()
     // Setup TCP callbacks
     tcp.onAccept(acceptCallback);
     tcp.onClose(closeCallback);
-    tcp.onError([](err_t err) {
-        // tcp.close();
-        // debugError(err);
-    });
-    tcp.onSent([](err_t err) {
-        hasData = false;
-    });
+    tcp.onError([](err_t err)
+                {
+                    // tcp.close();
+                    // debugError(err);
+                });
+    tcp.onSent([](err_t err)
+               { hasData = false; });
 
     // Start listening
     tcp.bind(IP_ADDR_ANY, 5555);
     tcp.listen();
 
-    AdcStream<uint8_t> adcStream({0}, CAPTURE_DEPTH);
-    adcStream.registerCallback(adcCallback);
-    adcStream.startCapture();
+    PicoAdcHardware<uint8_t> adcHardware;
+    AdcSampler<uint8_t> sampler(&adcHardware, {0, 1}, CAPTURE_DEPTH);
+    sampler.onSamplingComplete(adcCallback);
+    sampler.startCapture();
 
     bool failed = false;
 
@@ -98,29 +92,25 @@ int main()
             {
                 continue;
             }
-            else if (readyId == 0)
+            else
             {
-                err = tcp.send(adcStream.getBufferA(), CAPTURE_DEPTH);
+                err = tcp.send(readyBuffer, CAPTURE_DEPTH);
                 hasData = false;
-            }
-            else if (readyId == 1)
-            {
-                err = tcp.send(adcStream.getBufferB(), CAPTURE_DEPTH);
-                hasData = false;
-            }
-            if (err != ERR_OK)
-            {
-                if (err == ERR_MEM)
+
+                if (err != ERR_OK)
                 {
-                    // debugError(err);
-                }
-                else
-                {
-                    connected = false;
-                    failed = true;
-                    debugError(err);
-                    tcp.close();
-                    // break;
+                    if (err == ERR_MEM)
+                    {
+                        // debugError(err);
+                    }
+                    else
+                    {
+                        connected = false;
+                        failed = true;
+                        debugError(err);
+                        tcp.close();
+                        // break;
+                    }
                 }
             }
         }
